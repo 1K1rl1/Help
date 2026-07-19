@@ -1,0 +1,10 @@
+/.env
+node_modules/
+test_output.csv
+dedupe.db
+*.pyc
+__pycache__/
+/.venv
+/.env.local
+npm-debug.log
+package-lock.json

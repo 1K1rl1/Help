@@ -1,0 +1,40 @@
+version: '3.8'
+services:
+  receiver:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    restart: always
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_HOST=0.0.0.0
+      - FLASK_PORT=5000
+      - OFFLINE_ONLY=true
+      - TEST_OUTPUT_FORMAT=xlsx
+      - NOTIFY_URL=http://notify:3000/notify
+    volumes:
+      - ./:/app
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+    restart: always
+    depends_on:
+      - receiver
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - INCOMING_URL=http://receiver:5000/incoming
+      - NOTIFY_URL=http://notify:3000/notify
+    volumes:
+      - ./:/app
+  notify:
+    image: node:20-slim
+    restart: always
+    command: ["node", "max_bot.js"]
+    environment:
+      - NOTIFY_PORT=3000
+    volumes:
+      - ./:/app
+    ports:
+      - "3000:3000"
