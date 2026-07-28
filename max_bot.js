@@ -190,7 +190,18 @@ if (bot) {
       const attachmentJson = attachment.toJson();
       console.log('Uploaded attachment json:', JSON.stringify(attachmentJson, null, 2));
       if (!attachmentJson || !attachmentJson.payload || !attachmentJson.payload.token) {
-        throw new Error(`Upload returned invalid attachment token: ${JSON.stringify(attachmentJson)}`);
+        console.warn('Upload returned no attachment token; falling back to link send');
+        try {
+          // send link fallback to exported file
+          const link = exportUrl;
+          await bot.api.sendMessageToChat(chat_id, `Файл не удалось прикрепить; можно скачать здесь: ${link}`);
+          try { fs.unlinkSync(tmpPath); } catch (e) { console.warn('Failed to remove temp file:', tmpPath, e?.message || e); }
+          return ctx.reply(`Файл не прикреплён. Отправил ссылку: ${link}`);
+        } catch (sendLinkErr) {
+          console.error('Fallback link send failed:', sendLinkErr?.message || sendLinkErr);
+          try { fs.unlinkSync(tmpPath); } catch (e) { console.warn('Failed to remove temp file:', tmpPath, e?.message || e); }
+          throw new Error(`Upload returned invalid attachment token: ${JSON.stringify(attachmentJson)}`);
+        }
       }
       await bot.api.sendMessageToChat(chat_id, 'Файл экспортирован', { attachments: [attachmentJson] });
       try {
@@ -258,9 +269,24 @@ if (bot) {
           raw: message,
         };
 
-        console.log('Forwarding message to receiver:', JSON.stringify(payload, null, 2));
-        const response = await postWithRetry(INCOMING_URL, payload);
-        console.log('Receiver responded with:', JSON.stringify(response, null, 2));
+        // Skip forwarding messages that appear to be sent by this bot to avoid loops/duplicates
+        try {
+          const isOutgoing = (ctx.message && (ctx.message.outgoing === true || ctx.message.direction === 'outgoing'));
+          const sender = ctx.message && (ctx.message.sender || ctx.message.from || ctx.message.author || {});
+          const senderIsBot = Boolean(sender && (sender.is_bot || sender.type === 'bot' || sender.user_type === 'bot'));
+          const botIdEnv = (process.env.BOT_ID || process.env.MAX_BOT_ID || '').toString();
+          const senderId = (sender && (sender.id || sender.user_id || sender.bot_id || sender.uid) || '').toString();
+          const senderMatchesBotId = botIdEnv && senderId && botIdEnv === senderId;
+          if (isOutgoing || senderIsBot || senderMatchesBotId) {
+            console.log('Skipping forwarding of bot-originated or outgoing message');
+          } else {
+            console.log('Forwarding message to receiver:', JSON.stringify(payload, null, 2));
+            const response = await postWithRetry(INCOMING_URL, payload);
+            console.log('Receiver responded with:', JSON.stringify(response, null, 2));
+          }
+        } catch (forwardErr) {
+          console.error('Failed to forward message:', forwardErr && (forwardErr.message || forwardErr));
+        }
       } catch (e) {
         console.error('Failed to forward message:', e.message);
       }

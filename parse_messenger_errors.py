@@ -718,6 +718,72 @@ def is_empty_excel_row(row_values: List[str]) -> bool:
     return all(not cell.strip() for cell in row_values)
 
 
+def is_marked_as_done(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return "проставлено" in text or "done" in text or "checked" in text
+
+
+def read_existing_marked_excel_ids(file_path: str) -> List[str]:
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return []
+
+    if not os.path.exists(file_path):
+        return []
+
+    try:
+        wb = load_workbook(file_path, read_only=True, data_only=True)
+        ws = wb.active
+    except Exception as exc:
+        LOG.warning("Failed to read Excel file %s for marked rows: %s", file_path, exc)
+        return []
+
+    marked_ids: List[str] = []
+    header_found = False
+    header_row: List[str] = []
+    object_id_idx: Optional[int] = None
+    status_idx: Optional[int] = None
+
+    try:
+        for row in ws.iter_rows(values_only=True):
+            row_values = [normalize_excel_cell(cell) for cell in row]
+            if not header_found:
+                header_row = row_values
+                header_found = True
+                object_id_idx = next((idx for idx, header in enumerate(header_row) if header == "Идентификатор объекта нарушения"), 6)
+                status_idx = next((idx for idx, header in enumerate(header_row) if header.lower() in {"статус", "status", "проставлено"}), None)
+                if status_idx is None and len(header_row) > len(EXPECTED_HEADERS):
+                    status_idx = len(header_row) - 1
+                continue
+
+            if is_empty_excel_row(row_values):
+                continue
+
+            object_id = ""
+            if object_id_idx is not None and object_id_idx < len(row_values):
+                object_id = normalize_excel_cell(row_values[object_id_idx])
+            if not object_id and row_values:
+                object_id = normalize_excel_cell(row_values[6] if len(row_values) > 6 else row_values[0])
+            if not object_id:
+                continue
+
+            status_value = ""
+            if status_idx is not None and status_idx < len(row_values):
+                status_value = normalize_excel_cell(row_values[status_idx])
+            elif row_values:
+                status_value = normalize_excel_cell(row_values[-1])
+
+            if is_marked_as_done(status_value):
+                marked_ids.append(object_id)
+    finally:
+        wb.close()
+
+    return marked_ids
+
+
 def read_existing_excel_ids(file_path: str) -> List[str]:
     try:
         from openpyxl import load_workbook
@@ -820,6 +886,8 @@ def build_reply_text(status: str, details: Optional[List[str]] = None, object_id
         return "✅ Запись обработана"
     if status == "duplicate":
         return f"⚠️ Дубликат для объекта {object_id}" if object_id else "⚠️ Дубликат"
+    if status == "already_marked":
+        return f"⚠️ Уже проставлено для объекта {object_id}" if object_id else "⚠️ Уже проставлено"
     if status == "validation_error":
         if details:
             return "❌ Ошибка ввода: " + "; ".join(details)
@@ -906,6 +974,7 @@ def incoming():
     notify_chat_id = os.getenv("NOTIFICATION_CHAT_ID")
     notify_url = os.getenv("NOTIFY_URL")
     db_path = os.getenv("DEDUPE_DB_PATH", DEFAULT_DEDUPE_DB)
+    file_path = os.getenv("TEST_OUTPUT_XLSX", "test_output.xlsx")
     # Avoid processing the same message_id twice (after db_path is known)
     message_id = message.get("message_id")
     try:
@@ -949,7 +1018,13 @@ def incoming():
     base_time = datetime.datetime.now()
     rows_to_write: List[Dict[str, object]] = []
     duplicate_ids: List[str] = []
+    already_marked_ids: List[str] = []
+    existing_marked_ids = read_existing_marked_excel_ids(file_path)
     for idx, oid in enumerate(object_ids):
+        if oid in existing_marked_ids:
+            LOG.info("Object already marked as Проставлено in Excel file %s: %s", file_path, oid)
+            already_marked_ids.append(oid)
+            continue
         if is_duplicate(db_path, oid):
             LOG.info("Duplicate within 24h detected for object_id=%s. No row will be written.", oid)
             duplicate_ids.append(oid)
@@ -959,7 +1034,11 @@ def incoming():
             "row": build_table_row(fields, oid, base_time + datetime.timedelta(seconds=idx)),
         })
 
-    if not rows_to_write and duplicate_ids:
+    if not rows_to_write and (duplicate_ids or already_marked_ids):
+        if already_marked_ids:
+            marked_text = ", ".join(already_marked_ids)
+            send_bot_reply(notify_url, chat_id, build_reply_text("already_marked", object_id=marked_text), {"reply_to_message_id": message.get("message_id")})
+            return jsonify({"status": "already_marked", "object_ids": already_marked_ids}), 200
         duplicate_text = ", ".join(duplicate_ids)
         send_bot_reply(notify_url, chat_id, build_reply_text("duplicate", object_id=duplicate_text), {"reply_to_message_id": message.get("message_id")})
         return jsonify({"status": "duplicate", "object_ids": duplicate_ids}), 200
