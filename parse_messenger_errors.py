@@ -890,22 +890,12 @@ def incoming():
         return jsonify({"status": "ignored", "reason": "private chat"}), 200
 
     safe_debug_write(f"final_message_text={text!r}\n")
-
     # Ignore bot's own auto-replies to avoid feedback loops
     AUTO_REPLY_PREFIXES = ["✅", "⚠️", "❌", "Failed to forward message", "POST attempt"]
     for pref in AUTO_REPLY_PREFIXES:
         if text.startswith(pref):
             LOG.info("Ignoring auto-reply-like incoming message: %s", text[:120])
             return jsonify({"status": "ignored", "reason": "auto-reply"}), 200
-
-    # Avoid processing the same message_id twice
-    message_id = message.get("message_id")
-    try:
-        if is_message_processed(db_path, message_id):
-            LOG.info("Skipping already processed message_id=%s", message_id)
-            return jsonify({"status": "ignored", "reason": "already_processed"}), 200
-    except Exception:
-        LOG.exception("Failed to check message processed state for %s", message_id)
 
     drive_id = os.getenv("EXCEL_DRIVE_ID")
     item_id = os.getenv("EXCEL_ITEM_ID")
@@ -916,6 +906,14 @@ def incoming():
     notify_chat_id = os.getenv("NOTIFICATION_CHAT_ID")
     notify_url = os.getenv("NOTIFY_URL")
     db_path = os.getenv("DEDUPE_DB_PATH", DEFAULT_DEDUPE_DB)
+    # Avoid processing the same message_id twice (after db_path is known)
+    message_id = message.get("message_id")
+    try:
+        if is_message_processed(db_path, message_id):
+            LOG.info("Skipping already processed message_id=%s", message_id)
+            return jsonify({"status": "ignored", "reason": "already_processed"}), 200
+    except Exception:
+        LOG.exception("Failed to check message processed state for %s", message_id)
     if chat_id is None:
         chat_id = data.get("chat_id") or data.get("recipient") or data.get("chat", {}).get("chat_id")
     if chat_id is None and notify_chat_id:
@@ -974,7 +972,7 @@ def incoming():
         # Use SQLite rows table for offline storage
         db_rows_path = db_path
         out_format = os.getenv("TEST_OUTPUT_FORMAT", "xlsx").lower()
-            existing_ids = read_existing_db_ids(db_rows_path)
+        existing_ids = read_existing_db_ids(db_rows_path)
         for oid in object_ids:
             if oid in existing_ids and oid not in duplicate_ids:
                 duplicate_ids.append(oid)
