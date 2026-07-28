@@ -115,7 +115,13 @@ def normalize_process_name(value: str) -> str:
 def parse_object_ids(value: str) -> List[str]:
     if not value:
         return []
+    # Split on commas, semicolons, newlines and also on whitespace-separated IDs
     candidates = re.split(r"[,;\n]+", value)
+    # additionally split space-separated entries when no commas/semicolons are present
+    if len(candidates) == 1:
+        space_split = re.split(r"\s+", candidates[0])
+        if len(space_split) > 1:
+            candidates = space_split
     ids = []
     for item in candidates:
         clean = item.strip()
@@ -169,6 +175,29 @@ def parse_message(text: str) -> Dict[str, str]:
         line = re.sub(r"\s+", " ", line)
         LOG.info("parse_message processing line: %r", line)
 
+        # If we're currently collecting a multiline field, and this line doesn't look like a new label,
+        # treat it as continuation of the current field value.
+        if current_field in multiline_fields:
+            is_label = False
+            # check for colon-style label
+            if ':' in line:
+                label_candidate = line.split(':', 1)[0]
+                normalized_label = re.sub(r"\s+", " ", label_candidate.strip().lower()).replace('ё', 'е')
+                if normalized_label in alias_to_field:
+                    is_label = True
+            else:
+                lowline = line.lower()
+                for alias in alias_to_field:
+                    na = re.sub(r"\s+", " ", alias.lower()).replace('ё', 'е')
+                    if lowline == na or lowline.startswith(na + ' '):
+                        is_label = True
+                        break
+            if not is_label:
+                existing = values.get(current_field, "")
+                values[current_field] = f"{existing}\n{line}" if existing else line
+                LOG.info("parse_message appended (continuation) to %s => %r", current_field, values[current_field])
+                continue
+
         if ':' in line:
             label, value = line.split(':', 1)
             normalized_label = re.sub(r"\s+", " ", label.strip().lower()).replace('ё', 'е')
@@ -187,6 +216,42 @@ def parse_message(text: str) -> Dict[str, str]:
                 values[matched_field] = value.strip()
                 current_field = matched_field if matched_field in multiline_fields else None
                 LOG.info("parse_message fallback matched %s => %r", matched_field, values[matched_field])
+                continue
+            current_field = None
+        else:
+            # If the line contains only the label (no colon, no value), treat the next lines as the field value
+            label_only_matched = False
+            for alias, field in alias_to_field.items():
+                try:
+                    label_only_pattern = re.compile(rf"^{re.escape(alias)}$", re.IGNORECASE)
+                except re.error:
+                    continue
+                if label_only_pattern.match(line):
+                    # initialize empty value and set current_field to collect following lines
+                    values.setdefault(field, "")
+                    current_field = field if field in multiline_fields else None
+                    LOG.info("parse_message detected label-only %s, switching current_field=%s", alias, current_field)
+                    label_only_matched = True
+                    break
+            if label_only_matched:
+                continue
+
+            # Try matching patterns like "Название процесса размещение" (no colon)
+            matched_field = None
+            # Prefer longest aliases first to avoid partial matches
+            for alias, field in sorted(alias_to_field.items(), key=lambda x: -len(x[0])):
+                try:
+                    pattern = re.compile(rf"^{re.escape(alias)}\s+(.+)", re.IGNORECASE)
+                except re.error:
+                    continue
+                m = pattern.match(line)
+                if m:
+                    values[field] = m.group(1).strip()
+                    current_field = field if field in multiline_fields else None
+                    LOG.info("parse_message matched no-colon %s => %r", field, values[field])
+                    matched_field = field
+                    break
+            if matched_field:
                 continue
             current_field = None
 
@@ -269,8 +334,12 @@ def parse_message(text: str) -> Dict[str, str]:
         errors.append("Отсутствует обязательное поле: Название процесса")
     elif operation.lower() in {"input", ""}:
         errors.append("Название процесса не может быть пустым")
-    elif operation not in VALID_OPERATIONS and normalize_process_name(operation) not in PROCESS_ALIASES and normalize_process_name(operation) not in {"прием_товара", "размещение_товара"}:
-        errors.append("Недопустимое значение для Название процесса. Используйте: размещение или приемка")
+    else:
+        # Accept various aliases and normalized forms for operation
+        normalized_check = normalize_process_name(operation) or operation
+        allowed_ops = set(VALID_OPERATIONS.keys()) | set(PROCESS_ALIASES.values())
+        if normalized_check not in allowed_ops:
+            errors.append("Недопустимое значение для Название процесса. Используйте: размещение или приемка")
 
     if not login:
         errors.append("Отсутствует обязательное поле: Логин оператора склада")
