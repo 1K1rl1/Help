@@ -44,6 +44,12 @@ const fetch = (url, options = {}) => {
   });
 };
 
+global.fetch = fetch;
+globalThis.fetch = fetch;
+if (nodeFetch.Headers) global.Headers = nodeFetch.Headers;
+if (nodeFetch.Request) global.Request = nodeFetch.Request;
+if (nodeFetch.Response) global.Response = nodeFetch.Response;
+
 const { Bot } = require('@maxhub/max-bot-api');
 const express = require('express');
 const bodyParser = require('body-parser');
