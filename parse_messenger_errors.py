@@ -4,10 +4,13 @@ import time
 import logging
 import sqlite3
 import datetime
+import io
+import json
 from typing import Any, Dict, List, Optional
 
 import requests
 from flask import Flask, request, jsonify
+from flask import send_file
 from dotenv import load_dotenv
 
 print('DEBUG parse_messenger_errors.py loaded from', __file__)
@@ -467,6 +470,18 @@ def ensure_dedupe_db(db_path: str) -> None:
     finally:
         conn.close()
 
+def ensure_rows_table(db_path: str) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS rows (id INTEGER PRIMARY KEY AUTOINCREMENT, object_id TEXT NOT NULL, created_at TIMESTAMP NOT NULL, row_json TEXT)"
+        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rows_object ON rows(object_id)")
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def is_duplicate(db_path: str, object_id: str, window_hours: int = 24) -> bool:
     conn = sqlite3.connect(db_path)
@@ -488,6 +503,56 @@ def record_submission(db_path: str, object_id: str, raw_message: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+def write_row_to_db(db_path: str, row: List[str]) -> None:
+    ensure_rows_table(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        object_id = row[6] if len(row) > 6 else ''
+        cursor.execute("INSERT INTO rows (object_id, created_at, row_json) VALUES (?, ?, ?)", (object_id, datetime.datetime.now().isoformat(), json.dumps(row, ensure_ascii=False)))
+        conn.commit()
+    finally:
+        conn.close()
+
+def read_existing_db_ids(db_path: str) -> List[str]:
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT object_id FROM rows")
+        ids = [str(r[0]) for r in cursor.fetchall() if r and r[0]]
+        return ids
+    finally:
+        conn.close()
+
+def export_rows_to_xlsx(db_path: str) -> io.BytesIO:
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        raise RuntimeError('openpyxl is required to export XLSX')
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT row_json FROM rows ORDER BY created_at ASC")
+        rows = [json.loads(r[0]) for r in cursor.fetchall() if r and r[0]]
+    finally:
+        conn.close()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(EXPECTED_HEADERS)
+    for row in rows:
+        try:
+            ws.append([str(cell) for cell in row])
+        except Exception:
+            ws.append(row)
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
 
 
 def get_graph_access_token(tenant_id: str, client_id: str, client_secret: str) -> str:
@@ -852,13 +917,10 @@ def incoming():
 
     # If Azure/Excel not configured, write to local CSV/XLSX for testing
     if not drive_id or not item_id or not tenant_id or not client_id or not client_secret:
-        csv_path = os.getenv("TEST_OUTPUT_CSV", "test_output.csv")
-        xlsx_path = os.getenv("TEST_OUTPUT_XLSX", "test_output.xlsx")
+        # Use SQLite rows table for offline storage
+        db_rows_path = db_path
         out_format = os.getenv("TEST_OUTPUT_FORMAT", "xlsx").lower()
-        if out_format == 'xlsx':
-            existing_ids = read_existing_excel_ids(xlsx_path)
-        else:
-            existing_ids = read_existing_csv_ids(csv_path)
+        existing_ids = read_existing_db_ids(db_rows_path)
         for oid in object_ids:
             if oid in existing_ids and oid not in duplicate_ids:
                 duplicate_ids.append(oid)
@@ -866,20 +928,8 @@ def incoming():
         try:
             for item in rows_to_write:
                 row = item["row"]
-                if out_format == 'xlsx':
-                    LOG.info("Offline test output format is XLSX; writing to %s", xlsx_path)
-                    try:
-                        write_row_to_xlsx(xlsx_path, row)
-                        LOG.info("Wrote row to XLSX: %s", row)
-                    except Exception:
-                        LOG.warning("XLSX write failed — falling back to CSV")
-                        write_row_to_csv(csv_path, row)
-                        LOG.info("Wrote row to CSV fallback: %s", row)
-                else:
-                    LOG.info("Offline test output format is CSV; writing to %s", csv_path)
-                    write_row_to_csv(csv_path, row)
-                    LOG.info("Wrote row to CSV: %s", row)
-
+                write_row_to_db(db_rows_path, row)
+                LOG.info("Wrote row to DB: %s", row)
                 record_submission(db_path, item["object_id"], text)
                 written_ids.append(str(item["object_id"]))
 
@@ -889,7 +939,7 @@ def incoming():
             if notify_url:
                 send_bot_reply(notify_url, chat_id, status_text, {"status": "ok", "object_ids": written_ids, "reply_to_message_id": message.get("message_id")})
         except Exception as exc:
-            LOG.exception("Failed to write test output: %s", exc)
+            LOG.exception("Failed to write test output to DB: %s", exc)
             if notify_url:
                 send_bot_reply(notify_url, chat_id, build_reply_text("error", [str(exc)]), {"reply_to_message_id": message.get("message_id")})
             return jsonify({"error": str(exc)}), 500
@@ -911,6 +961,17 @@ def incoming():
             return jsonify({"error": str(exc)}), 500
 
     return jsonify({"status": "ok"}), 200
+
+
+@app.route('/export_offline', methods=['GET'])
+def export_offline():
+    db_path = os.getenv("DEDUPE_DB_PATH", DEFAULT_DEDUPE_DB)
+    try:
+        bio = export_rows_to_xlsx(db_path)
+        return send_file(bio, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name='export.xlsx')
+    except Exception as exc:
+        LOG.exception('Failed to export rows: %s', exc)
+        return jsonify({'error': str(exc)}), 500
 
 
 if __name__ == "__main__":

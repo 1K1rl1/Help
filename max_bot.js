@@ -177,9 +177,29 @@ if (bot) {
     }
 
     try {
-      const result = await uploadAndSendExcel(chat_id, filePath);
-      console.log('Excel uploaded and sent:', result);
-      return ctx.reply('Готово. Файл отправлен в чат.');
+      // New flow: download export from backend and send that file
+      const exportUrl = (process.env.EXPORT_URL || INCOMING_URL.replace(/\/incoming$/, '').replace(/\/$/, '') + '/export_offline');
+      const tmpPath = path.resolve(`export_offline-${Date.now()}-${Math.random().toString(36).slice(2,8)}.xlsx`);
+      console.log('Downloading export from', exportUrl);
+      const res = await fetch(exportUrl);
+      if (!res.ok) throw new Error(`export fetch failed status ${res.status}`);
+      const arrayBuffer = await res.arrayBuffer();
+      fs.writeFileSync(tmpPath, Buffer.from(arrayBuffer));
+      console.log('Export saved to', tmpPath);
+      const attachment = await bot.api.uploadFile({ source: tmpPath });
+      const attachmentJson = attachment.toJson();
+      console.log('Uploaded attachment json:', JSON.stringify(attachmentJson, null, 2));
+      if (!attachmentJson || !attachmentJson.payload || !attachmentJson.payload.token) {
+        throw new Error(`Upload returned invalid attachment token: ${JSON.stringify(attachmentJson)}`);
+      }
+      await bot.api.sendMessageToChat(chat_id, 'Файл экспортирован', { attachments: [attachmentJson] });
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch (e) {
+        console.warn('Failed to remove temp file:', tmpPath, e?.message || e);
+      }
+      console.log('Excel exported and sent');
+      return ctx.reply('Готово. Файл экспортирован и отправлен.');
     } catch (e) {
       console.error('Failed to upload and send Excel:', e?.message || e);
       if (process.env.FALLBACK_TO_BACKEND === 'true') {
