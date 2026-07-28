@@ -513,6 +513,34 @@ def record_submission(db_path: str, object_id: str, raw_message: str) -> None:
     finally:
         conn.close()
 
+
+def record_submission_with_message(db_path: str, object_id: str, raw_message: str, message_id: Optional[str] = None) -> None:
+    """Store submission with optional message_id inside raw_message as JSON to allow dedupe by message_id."""
+    payload = {"message": raw_message}
+    if message_id is not None:
+        payload["message_id"] = str(message_id)
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO submissions (object_id, created_at, raw_message) VALUES (?, ?, ?)", (object_id, datetime.datetime.now().isoformat(), json.dumps(payload, ensure_ascii=False)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def is_message_processed(db_path: str, message_id: Optional[str]) -> bool:
+    if not message_id:
+        return False
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        pattern = f'%"message_id": "{message_id}"%'
+        cursor.execute("SELECT COUNT(1) FROM submissions WHERE raw_message LIKE ?", (pattern,))
+        count = cursor.fetchone()[0]
+        return count > 0
+    finally:
+        conn.close()
+
 def write_row_to_db(db_path: str, row: List[str]) -> None:
     ensure_rows_table(db_path)
     conn = sqlite3.connect(db_path)
@@ -863,6 +891,22 @@ def incoming():
 
     safe_debug_write(f"final_message_text={text!r}\n")
 
+    # Ignore bot's own auto-replies to avoid feedback loops
+    AUTO_REPLY_PREFIXES = ["✅", "⚠️", "❌", "Failed to forward message", "POST attempt"]
+    for pref in AUTO_REPLY_PREFIXES:
+        if text.startswith(pref):
+            LOG.info("Ignoring auto-reply-like incoming message: %s", text[:120])
+            return jsonify({"status": "ignored", "reason": "auto-reply"}), 200
+
+    # Avoid processing the same message_id twice
+    message_id = message.get("message_id")
+    try:
+        if is_message_processed(db_path, message_id):
+            LOG.info("Skipping already processed message_id=%s", message_id)
+            return jsonify({"status": "ignored", "reason": "already_processed"}), 200
+    except Exception:
+        LOG.exception("Failed to check message processed state for %s", message_id)
+
     drive_id = os.getenv("EXCEL_DRIVE_ID")
     item_id = os.getenv("EXCEL_ITEM_ID")
     table_name = os.getenv("EXCEL_TABLE_NAME", "Table1")
@@ -884,6 +928,11 @@ def incoming():
         LOG.warning("Excel/Azure configuration not found — using CSV fallback for testing")
 
     ensure_dedupe_db(db_path)
+    # Ensure rows table exists for offline DB storage
+    try:
+        ensure_rows_table(db_path)
+    except Exception:
+        LOG.exception("Failed to ensure rows table exists in DB %s", db_path)
 
     try:
         fields = parse_message(text)
@@ -925,7 +974,7 @@ def incoming():
         # Use SQLite rows table for offline storage
         db_rows_path = db_path
         out_format = os.getenv("TEST_OUTPUT_FORMAT", "xlsx").lower()
-        existing_ids = read_existing_db_ids(db_rows_path)
+            existing_ids = read_existing_db_ids(db_rows_path)
         for oid in object_ids:
             if oid in existing_ids and oid not in duplicate_ids:
                 duplicate_ids.append(oid)
