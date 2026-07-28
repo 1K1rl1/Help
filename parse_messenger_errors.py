@@ -93,6 +93,15 @@ def configure_logging() -> None:
     LOG.setLevel(logging.INFO)
 
 
+def safe_debug_write(text: str) -> None:
+    """Пишет в incoming_debug.log, но не проваливается при OSError (например, No space left on device)."""
+    try:
+        with open("incoming_debug.log", "a", encoding="utf-8") as debug_file:
+            debug_file.write(text)
+    except OSError as e:
+        LOG.warning("Cannot write incoming_debug.log: %s — skipping debug write", e)
+
+
 def retry_call(fn, *args, retries: int = 3, initial_delay: float = 1.0, backoff: float = 2.0, **kwargs):
     delay = initial_delay
     for attempt in range(1, retries + 1):
@@ -807,9 +816,8 @@ def send_bot_reply(notify_url: str, chat_id: Optional[str], text: str, extra_pay
 @app.route("/incoming", methods=["POST"])
 def incoming():
     data = request.get_json(silent=True)
-    with open("incoming_debug.log", "a", encoding="utf-8") as debug_file:
-        debug_file.write("--- INCOMING START ---\n")
-        debug_file.write(f"data={data!r}\n")
+    safe_debug_write("--- INCOMING START ---\n")
+    safe_debug_write(f"data={data!r}\n")
     if not data:
         return jsonify({"error": "no json body"}), 400
 
@@ -818,8 +826,7 @@ def incoming():
     if not isinstance(text, str):
         text = ""
     text = text.strip()
-    with open("incoming_debug.log", "a", encoding="utf-8") as debug_file:
-        debug_file.write(f"top_level_text={text!r}\n")
+    safe_debug_write(f"top_level_text={text!r}\n")
     if not text:
         raw_text = data.get("raw", {}).get("body", {}).get("text") or data.get("raw", {}).get("text")
         if isinstance(raw_text, str):
@@ -827,8 +834,7 @@ def incoming():
         else:
             text = ""
         if text:
-            with open("incoming_debug.log", "a", encoding="utf-8") as debug_file:
-                debug_file.write(f"fallback_raw_text={text!r}\n")
+            safe_debug_write(f"fallback_raw_text={text!r}\n")
 
     chat = data.get("chat", {}) or {}
     raw = data.get("raw") or {}
@@ -855,8 +861,7 @@ def incoming():
         LOG.info("Ignoring private chat type %s for chat_id %s", chat_type, chat_id)
         return jsonify({"status": "ignored", "reason": "private chat"}), 200
 
-    with open("incoming_debug.log", "a", encoding="utf-8") as debug_file:
-        debug_file.write(f"final_message_text={text!r}\n")
+    safe_debug_write(f"final_message_text={text!r}\n")
 
     drive_id = os.getenv("EXCEL_DRIVE_ID")
     item_id = os.getenv("EXCEL_ITEM_ID")
