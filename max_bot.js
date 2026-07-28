@@ -9,8 +9,9 @@ const fs = require('fs');
 function configureTlsSecurity() {
   const useInsecureTls = (process.env.NODE_TLS_INSECURE || '').toLowerCase() === 'true';
   const rejectUnauthorizedDisabled = process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0';
+  const shouldDisableTls = useInsecureTls || rejectUnauthorizedDisabled || (process.env.ALLOW_INSECURE_TLS || '').toLowerCase() === 'true';
 
-  if (!useInsecureTls && !rejectUnauthorizedDisabled) {
+  if (!shouldDisableTls) {
     return;
   }
 
@@ -31,7 +32,18 @@ function configureTlsSecurity() {
 
 configureTlsSecurity();
 
-const fetch = require('node-fetch');
+const nodeFetch = require('node-fetch');
+const httpsAgent = new https.Agent({ rejectUnauthorized: false });
+const httpAgent = new http.Agent();
+const fetch = (url, options = {}) => {
+  const target = typeof url === 'string' ? url : String(url || '');
+  const isHttps = /^https:/i.test(target);
+  return nodeFetch(url, {
+    ...options,
+    agent: options.agent || (isHttps ? httpsAgent : httpAgent),
+  });
+};
+
 const { Bot } = require('@maxhub/max-bot-api');
 const express = require('express');
 const bodyParser = require('body-parser');
