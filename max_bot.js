@@ -91,13 +91,14 @@ if (bot) {
 
 const UPLOAD_URL = process.env.UPLOAD_URL || INCOMING_URL.replace(/\/incoming$/, '').replace(/\/$/, '') + '/upload_offline';
 const TEST_OUTPUT_XLSX = process.env.TEST_OUTPUT_XLSX || 'test_output.xlsx';
+const ENABLE_BACKEND_UPLOAD = (process.env.ENABLE_BACKEND_UPLOAD || process.env.FALLBACK_TO_BACKEND || 'false').toLowerCase() === 'true';
 
 async function uploadAndSendExcel(chat_id, filePath) {
   if (!fs.existsSync(filePath)) {
     throw new Error(`Файл не найден: ${filePath}`);
   }
 
-  if (bot && bot.api && typeof bot.api.sendMessageToChat === 'function') {
+  if (ENABLE_BACKEND_UPLOAD && bot && bot.api && typeof bot.api.sendMessageToChat === 'function') {
     try {
       const response = await postWithRetry(UPLOAD_URL, {});
       if (response && response.status === 'ok' && response.link) {
@@ -113,10 +114,23 @@ async function uploadAndSendExcel(chat_id, filePath) {
   }
 
   const attachment = await bot.api.uploadFile({ source: filePath });
-  const message = await bot.api.sendMessageToChat(chat_id, 'Отправляю файл Excel', {
-    attachments: [attachment.toJson()],
-  });
-  return message;
+  const attachmentJson = attachment.toJson();
+  console.log('Uploaded attachment json:', JSON.stringify(attachmentJson, null, 2));
+
+  if (!attachmentJson || !attachmentJson.payload || !attachmentJson.payload.token) {
+    throw new Error(`Upload returned invalid attachment token: ${JSON.stringify(attachmentJson)}`);
+  }
+
+  try {
+    return await bot.api.sendMessageToChat(chat_id, '', {
+      attachments: [attachmentJson],
+    });
+  } catch (err) {
+    console.warn('First send attempt failed, retrying with text and attachment:', err?.message || err);
+    return await bot.api.sendMessageToChat(chat_id, 'Отправляю файл Excel', {
+      attachments: [attachmentJson],
+    });
+  }
 }
 
 if (bot) {
