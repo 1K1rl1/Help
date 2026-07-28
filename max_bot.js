@@ -116,8 +116,37 @@ async function uploadAndSendExcel(chat_id, filePath) {
   const attachment = await bot.api.uploadFile({ source: filePath });
   const attachmentJson = attachment.toJson();
   console.log('Uploaded attachment json:', JSON.stringify(attachmentJson, null, 2));
-
   if (!attachmentJson || !attachmentJson.payload || !attachmentJson.payload.token) {
+    console.warn('Upload did not return token, attempting buffer upload fallback');
+    try {
+      const buf = fs.readFileSync(filePath);
+      const attachment2 = await bot.api.uploadFile({ source: buf });
+      const attachmentJson2 = attachment2.toJson();
+      console.log('Uploaded attachment json (buffer):', JSON.stringify(attachmentJson2, null, 2));
+      if (attachmentJson2 && attachmentJson2.payload && attachmentJson2.payload.token) {
+        try {
+          return await bot.api.sendMessageToChat(chat_id, '', { attachments: [attachmentJson2] });
+        } catch (err2) {
+          console.warn('Send after buffer upload failed, retrying with text:', err2?.message || err2);
+          return await bot.api.sendMessageToChat(chat_id, 'Отправляю файл Excel', { attachments: [attachmentJson2] });
+        }
+      }
+    } catch (fallbackErr) {
+      console.warn('Buffer upload fallback failed:', fallbackErr?.message || fallbackErr);
+    }
+
+    // If backend upload is enabled, try that next
+    if (ENABLE_BACKEND_UPLOAD) {
+      try {
+        const response = await postWithRetry(UPLOAD_URL, {});
+        if (response && response.status === 'ok' && response.link) {
+          return await bot.api.sendMessageToChat(chat_id, `Файл доступен по ссылке: ${response.link}`);
+        }
+      } catch (be) {
+        console.warn('Backend upload fallback also failed:', be?.message || be);
+      }
+    }
+
     throw new Error(`Upload returned invalid attachment token: ${JSON.stringify(attachmentJson)}`);
   }
 
