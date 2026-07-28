@@ -301,4 +301,25 @@ app.post('/notify', async (req, res) => {
   }
 });
 
-app.listen(NOTIFY_PORT, () => console.log(`Notify server listening on ${NOTIFY_PORT}`));
+const server = app.listen(NOTIFY_PORT, () => console.log(`Notify server listening on ${NOTIFY_PORT}`));
+
+server.on('error', (err) => {
+  console.error('Notify server error:', err && err.message ? err.message : err);
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`Port ${NOTIFY_PORT} is already in use. Notify server won't start on that port.`);
+    const fallbackPort = Number(process.env.NOTIFY_FALLBACK_PORT || (NOTIFY_PORT + 1));
+    console.warn(`Attempting to start notify server on fallback port ${fallbackPort}...`);
+    try {
+      const fallbackServer = app.listen(fallbackPort, () => console.log(`Notify server listening on fallback port ${fallbackPort}`));
+      fallbackServer.on('error', (err2) => {
+        console.error('Fallback notify server failed to start:', err2 && err2.message ? err2.message : err2);
+        process.exit(1);
+      });
+    } catch (e) {
+      console.error('Failed to start fallback notify server:', e && e.message ? e.message : e);
+      process.exit(1);
+    }
+  } else {
+    process.exit(1);
+  }
+});
